@@ -1,0 +1,40 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install pygame sounddevice numpy scipy pyinstaller
+
+      - name: Build EXE
+        run: >
+          pyinstaller
+          --onefile
+          --windowed
+          --name "BrutalSequencer"
+          --collect-all sounddevice
+          --collect-all pygame
+          brutal_sequencer.py
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: BrutalSequencer-Windows
+          path: dist/BrutalSequencer.exe
+          retention-days: 90
