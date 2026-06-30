@@ -33,7 +33,11 @@ jobs:
           # Build with explicit DLL inclusion
           $cmd = "pyinstaller --onefile --windowed --name BrutalSequencer " +
                  "--collect-all sounddevice --collect-data sounddevice " +
-                 "--collect-all pygame $addBinary brutal_sequencer.py"
+                 "--collect-all pygame --collect-binaries pygame " +
+                 "--hidden-import pygame --hidden-import pygame.mixer " +
+                 "--hidden-import sounddevice --hidden-import numpy " +
+                 "--hidden-import scipy --hidden-import scipy.signal " +
+                 "$addBinary brutal_sequencer.py"
           Write-Host "Running: $cmd"
           Invoke-Expression $cmd
 
