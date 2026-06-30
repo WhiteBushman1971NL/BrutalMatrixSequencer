@@ -22,15 +22,20 @@ jobs:
         run: |
           pip install pygame sounddevice numpy scipy pyinstaller
 
-      - name: Build EXE
-        run: >
-          pyinstaller
-          --onefile
-          --windowed
-          --name "BrutalSequencer"
-          --collect-all sounddevice
-          --collect-all pygame
-          brutal_sequencer.py
+      - name: Bundle PortAudio DLL + Build EXE
+        shell: pwsh
+        run: |
+          # Find the PortAudio DLL that ships inside the sounddevice package
+          $sdDir = python -c "import sounddevice, os; print(os.path.dirname(sounddevice.__file__))"
+          $dlls = Get-ChildItem -Path $sdDir -Recurse -Filter "*.dll" | Select-Object -ExpandProperty FullName
+          $addBinary = ($dlls | ForEach-Object { "--add-binary `"$_;.`"" }) -join " "
+
+          # Build with explicit DLL inclusion
+          $cmd = "pyinstaller --onefile --windowed --name BrutalSequencer " +
+                 "--collect-all sounddevice --collect-data sounddevice " +
+                 "--collect-all pygame $addBinary brutal_sequencer.py"
+          Write-Host "Running: $cmd"
+          Invoke-Expression $cmd
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
