@@ -108,7 +108,7 @@ function lp1(data, cutoff, sr) {
 }
 
 function makeBuffer(ctx, data) {
-  const buf = ctx.createBuffer(2, data.length, sr);
+  const buf = ctx.createBuffer(2, data.length, SR);
   buf.copyToChannel(data, 0);
   buf.copyToChannel(data, 1);
   return buf;
@@ -583,10 +583,18 @@ render();
 
 // Audio context must be created on user gesture
 async function init() {
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SR });
-  await buildSounds();
-  document.getElementById('loading').style.display = 'none';
-  document.getElementById('ui').style.display = 'flex';
+  try {
+    document.getElementById('load-label').textContent = 'Loading sounds…';
+    document.getElementById('load-label').style.color = '#c8c8d8';
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SR });
+    await buildSounds();
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('ui').style.display = 'flex';
+  } catch(e) {
+    document.getElementById('load-label').textContent = 'Error: ' + e.message;
+    document.getElementById('load-label').style.color = '#ff6060';
+    console.error(e);
+  }
 }
 
 // Start on first interaction
