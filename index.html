@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Brutal Matrix Sequencer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a10; overflow: hidden; font-family: 'Helvetica Neue', Arial, sans-serif; }
+  canvas { display: block; }
+  #ui {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    height: 70px; background: #0e0e16;
+    border-top: 1px solid #1c1c2c;
+    display: flex; align-items: center; gap: 0; padding: 0 16px;
+  }
+  #palette { display: flex; gap: 10px; align-items: center; flex: 1; justify-content: center; }
+  .inst-btn {
+    width: 28px; height: 28px; border-radius: 50%; border: none; cursor: pointer;
+    transition: transform .12s, box-shadow .12s; position: relative;
+  }
+  .inst-btn:hover  { transform: scale(1.25); }
+  .inst-btn.active { transform: scale(1.3); box-shadow: 0 0 0 3px rgba(255,255,255,.4); }
+  .inst-label {
+    position: absolute; bottom: 34px; left: 50%; transform: translateX(-50%);
+    font-size: 10px; white-space: nowrap; pointer-events: none;
+    opacity: 0; transition: opacity .15s;
+  }
+  .inst-btn:hover .inst-label, .inst-btn.active .inst-label { opacity: 1; }
+  #controls { display: flex; align-items: center; gap: 10px; }
+  #bpm-display {
+    background: #16162a; border: 1px solid #1c1c2c; border-radius: 6px;
+    padding: 6px 14px; color: #c8c8d8; font-size: 14px; font-weight: bold;
+    cursor: ew-resize; user-select: none; min-width: 110px; text-align: center;
+  }
+  #play-btn {
+    width: 44px; height: 36px; border-radius: 6px; border: none; cursor: pointer;
+    font-size: 16px; transition: background .1s;
+  }
+  #hint { position: fixed; bottom: 76px; left: 12px; color: #505068; font-size: 11px; }
+  #loading {
+    position: fixed; inset: 0; background: #0a0a10;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+  }
+  #load-label { color: #c8c8d8; font-size: 15px; font-weight: bold; }
+  #load-bar-bg { width: 300px; height: 10px; background: #1c1c2c; border-radius: 5px; overflow: hidden; }
+  #load-bar    { height: 100%; width: 0; border-radius: 5px; transition: width .05s; }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div id="load-label">Loading sounds…</div>
+  <div id="load-bar-bg"><div id="load-bar"></div></div>
+</div>
+
+<canvas id="c"></canvas>
+
+<div id="ui" style="display:none">
+  <div id="palette"></div>
+  <div id="controls">
+    <div id="bpm-display">♩ 120 BPM</div>
+    <button id="play-btn">▶</button>
+  </div>
+</div>
+
+<div id="hint">SPACE play/stop · R reset · drag BPM · right-click erase</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+//  Constants
+// ═══════════════════════════════════════════════════════════════
+const COLS = 16, ROWS = 16;
+const SR   = 44100;
+
+const PITCHES_ASC = [110,130.81,146.83,164.81,196,220,261.63,293.66,
+                     329.63,392,440,523.25,587.33,659.25,783.99,880];
+const PITCHES = [...PITCHES_ASC].reverse();   // index 0 = top = highest
+
+const INSTRUMENTS = [
+  { name:'Glass Bell', color:'#00dcff', r:0,   g:220, b:255, synth:'glass_bell' },
+  { name:'C64 Lead',   color:'#648cff', r:100, g:140, b:255, synth:'c64_lead'   },
+  { name:'C64 Bass',   color:'#3c50dc', r:60,  g:80,  b:220, synth:'c64_bass'   },
+  { name:'C64 Arp',    color:'#a064ff', r:160, g:100, b:255, synth:'c64_arp'    },
+  { name:'C64 Bell',   color:'#b4dcff', r:180, g:220, b:255, synth:'c64_bell'   },
+  { name:'C64 Drums',  color:'#8c8cc8', r:140, g:140, b:200, synth:'drum'       },
+  { name:'Didgeridoo', color:'#50b450', r:80,  g:180, b:80,  synth:'didgeridoo' },
+  { name:'Rhodes',     color:'#ffa537', r:255, g:165, b:55,  synth:'rhodes'     },
+  { name:'Kalimba',    color:'#ffdc3c', r:255, g:220, b:60,  synth:'kalimba'    },
+  { name:'Cat Meow',   color:'#ff64a5', r:255, g:100, b:165, synth:'cat'        },
+];
+
+// ═══════════════════════════════════════════════════════════════
+//  Synthesis helpers
+// ═══════════════════════════════════════════════════════════════
+function ar(data, sr, attack, release) {
+  const a = Math.min(Math.round(sr * attack), data.length);
+  const r = Math.min(Math.round(sr * release), data.length);
+  for (let i = 0; i < a; i++) data[i] *= i / a;
+  for (let i = 0; i < r; i++) data[data.length - 1 - i] *= i / r;
+}
+
+function lp1(data, cutoff, sr) {
+  const a1 = Math.exp(-2 * Math.PI * cutoff / sr);
+  const b0 = 1 - a1;
+  let y = 0;
+  for (let i = 0; i < data.length; i++) { y = b0 * data[i] + a1 * y; data[i] = y; }
+}
+
+function makeBuffer(ctx, data) {
+  const buf = ctx.createBuffer(2, data.length, sr);
+  buf.copyToChannel(data, 0);
+  buf.copyToChannel(data, 1);
+  return buf;
+}
+
+// ── Instruments ────────────────────────────────────────────────
+function synth_glass_bell(freq) {
+  const dur = 2.0, n = Math.round(SR * dur), data = new Float32Array(n);
+  const parts = [[1,0.55],[2.76,0.22],[5.40,0.10],[8.93,0.07]];
+  for (let i = 0; i < n; i++) {
+    const t = i / SR, env = Math.exp(-t * 2.4);
+    let s = 0;
+    for (const [r, a] of parts) s += a * Math.sin(2*Math.PI*freq*r*t);
+    data[i] = s * env * 0.65;
+  }
+  ar(data, SR, 0.003, 0); return data;
+}
+
+function synth_c64_lead(freq) {
+  const dur = 0.28, n = Math.round(SR * dur), data = new Float32Array(n);
+  for (let i = 0; i < n; i++) data[i] = ((i/SR*freq%1) < 0.25) ? 1 : -1;
+  lp1(data, 3200, SR);
+  ar(data, SR, 0.005, 0.05);
+  for (let i=0;i<n;i++) data[i]*=0.45; return data;
+}
+
+function synth_c64_bass(freq) {
+  freq = Math.max(freq * 0.5, 55);
+  const dur = 0.40, n = Math.round(SR * dur), data = new Float32Array(n);
+  for (let i = 0; i < n; i++) data[i] = 2*((i/SR*freq)%1)-1;
+  lp1(data, 700, SR);
+  ar(data, SR, 0.008, 0.07);
+  for (let i=0;i<n;i++) data[i]*=0.55; return data;
+}
+
+function synth_c64_arp(freq) {
+  const dur = 0.12, n = Math.round(SR * dur), data = new Float32Array(n);
+  for (let i = 0; i < n; i++) data[i] = ((i/SR*freq%1) < 0.5) ? 1 : -1;
+  lp1(data, 4000, SR);
+  ar(data, SR, 0.003, 0.03);
+  for (let i=0;i<n;i++) data[i]*=0.40; return data;
+}
+
+function synth_c64_bell(freq) {
+  const dur = 1.2, n = Math.round(SR * dur), data = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = i/SR, ph = (t*freq)%1;
+    data[i] = (2*Math.abs(2*ph-1)-1) * Math.exp(-t*3.0) * 0.50;
+  }
+  ar(data, SR, 0.002, 0); return data;
+}
+
+function synth_rhodes(freq) {
+  const dur = 1.1, n = Math.round(SR * dur), data = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = i/SR;
+    const mi = Math.exp(-t*3.5)*5;
+    const mod = Math.sin(2*Math.PI*freq*t);
+    data[i] = Math.sin(2*Math.PI*freq*t + mi*mod) * Math.exp(-t*2.0) * 0.55;
+  }
+  ar(data, SR, 0.004, 0); return data;
+}
+
+function synth_kalimba(freq) {
+  const delay = Math.max(2, Math.round(SR / freq));
+  const n = Math.round(SR * 1.6), data = new Float32Array(n);
+  const buf = new Float32Array(delay);
+  // Seeded noise (deterministic per freq)
+  let seed = Math.round(freq * 10);
+  const rand = () => { seed = (seed * 1664525 + 1013904223) & 0xffffffff; return (seed >>> 0) / 0xffffffff * 2 - 1; };
+  for (let i = 0; i < delay; i++) buf[i] = rand();
+  const decay = 0.9995;
+  for (let i = 0; i < n; i++) {
+    const idx = i % delay, nxt = (i+1) % delay;
+    data[i] = buf[idx];
+    buf[idx] = decay * 0.5 * (buf[idx] + buf[nxt]);
+  }
+  for (let i = 0; i < n; i++) data[i] *= Math.exp(-3.5 * i / n) * 0.80;
+  return data;
+}
+
+function synth_didgeridoo(freq) {
+  freq = Math.min(freq, 220);
+  const dur = 0.65, n = Math.round(SR * dur), data = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = i/SR;
+    data[i] = (0.50*Math.sin(2*Math.PI*freq*t)
+             + 0.28*Math.sin(2*Math.PI*freq*2*t)
+             + 0.14*Math.sin(2*Math.PI*freq*3*t)
+             + 0.06*Math.sin(2*Math.PI*freq*5*t))
+             * (0.75 + 0.25*Math.sin(2*Math.PI*8*t)) * 0.52;
+  }
+  ar(data, SR, 0.025, 0.12); return data;
+}
+
+function synth_drum(row) {
+  // Seeded RNG per row
+  let seed = row * 7 + 13;
+  const rand = () => { seed = (seed * 1664525 + 1013904223) & 0xffffffff; return (seed >>> 0) / 0xffffffff * 2 - 1; };
+  if (row >= 12) {
+    const n = Math.round(SR*0.50), data = new Float32Array(n);
+    const base = 80 + (15-row)*20;
+    let phase = 0;
+    for (let i=0; i<n; i++) {
+      const t=i/SR; const pf = base*Math.exp(-t*20);
+      phase += 2*Math.PI*pf/SR;
+      data[i] = (Math.sin(phase)*0.93 + rand()*0.07) * Math.exp(-t*9) * 0.85;
+    }
+    return data;
+  } else if (row >= 8) {
+    const n = Math.round(SR*0.22), data = new Float32Array(n), tone_f = 160+(11-row)*25;
+    for (let i=0; i<n; i++) {
+      const t=i/SR;
+      data[i] = (Math.sin(2*Math.PI*tone_f*t)*0.25 + rand()*0.75) * Math.exp(-t*18) * 0.70;
+    }
+    return data;
+  } else if (row >= 5) {
+    const dur = 0.05+(8-row)*0.04, n = Math.round(SR*dur), data = new Float32Array(n);
+    for (let i=0; i<n; i++) { data[i] = rand() * (i%2===0?1:-1) * Math.exp(-10*i/n) * 0.45; }
+    return data;
+  } else {
+    const dur = 0.30+row*0.01, n = Math.round(SR*dur), data = new Float32Array(n);
+    for (let i=0; i<n; i++) { data[i] = rand() * (i%2===0?1:-1) * Math.exp(-7*i/n) * 0.38; }
+    return data;
+  }
+}
+
+function synth_cat(freq) {
+  const dur = 0.55, n = Math.round(SR * dur), data = new Float32Array(n);
+  let phase = 0;
+  for (let i = 0; i < n; i++) {
+    const t = i/SR;
+    const f = freq * (1.5 - 0.5*t/dur);
+    phase += 2*Math.PI*f/SR;
+    data[i] = (Math.sin(phase) + 0.3*Math.sin(2*phase) + 0.1*Math.sin(3*phase))
+              * Math.pow(Math.sin(Math.PI*t/dur), 0.6) * 0.45;
+  }
+  return data;
+}
+
+const SYNTH_FNS = {
+  glass_bell: synth_glass_bell,
+  c64_lead:   synth_c64_lead,
+  c64_bass:   synth_c64_bass,
+  c64_arp:    synth_c64_arp,
+  c64_bell:   synth_c64_bell,
+  drum:       (_, row) => synth_drum(row),
+  didgeridoo: synth_didgeridoo,
+  rhodes:     synth_rhodes,
+  kalimba:    synth_kalimba,
+  cat:        synth_cat,
+};
+
+// ═══════════════════════════════════════════════════════════════
+//  Audio context + buffer cache
+// ═══════════════════════════════════════════════════════════════
+let audioCtx = null;
+const BUFS = {};   // key: `${instIdx}-${row}`
+
+async function buildSounds() {
+  const total = INSTRUMENTS.length * ROWS;
+  let done = 0;
+  const bar   = document.getElementById('load-bar');
+  const label = document.getElementById('load-label');
+  for (let ii = 0; ii < INSTRUMENTS.length; ii++) {
+    const inst = INSTRUMENTS[ii];
+    const fn   = SYNTH_FNS[inst.synth];
+    for (let row = 0; row < ROWS; row++) {
+      const data = (inst.synth === 'drum') ? fn(null, row) : fn(PITCHES[row]);
+      BUFS[`${ii}-${row}`] = makeBuffer(audioCtx, data);
+      done++;
+      bar.style.width   = (done/total*100) + '%';
+      bar.style.background = inst.color;
+      label.textContent = `Loading  ${inst.name}…`;
+      label.style.color = inst.color;
+      // Yield to browser every 8 sounds so UI stays responsive
+      if (done % 8 === 0) await new Promise(r => setTimeout(r, 0));
+    }
+  }
+}
+
+function playSound(ii, row, when) {
+  const buf = BUFS[`${ii}-${row}`];
+  if (!buf) return;
+  const src  = audioCtx.createBufferSource();
+  const gain = audioCtx.createGain();
+  src.buffer = buf;
+  gain.gain.value = 0.80;
+  src.connect(gain);
+  gain.connect(audioCtx.destination);
+  src.start(when);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Sequencer
+// ═══════════════════════════════════════════════════════════════
+let bpm         = 120;
+let playing     = false;
+let step        = 0;
+let nextStepAt  = 0;
+let schedTimer  = null;
+const grid      = Array.from({length:ROWS}, () => new Array(COLS).fill(null));
+const flash     = Array.from({length:ROWS}, () => new Float32Array(COLS));
+
+function stepDur() { return 60 / bpm / 4; }
+
+function scheduler() {
+  const lookahead = 0.10;
+  while (nextStepAt < audioCtx.currentTime + lookahead) {
+    const s = step;
+    const when = nextStepAt;
+    for (let row = 0; row < ROWS; row++) {
+      const ii = grid[row][s];
+      if (ii !== null) {
+        playSound(ii, row, when);
+        const delay = Math.max(0, (when - audioCtx.currentTime) * 1000);
+        setTimeout(() => { flash[row][s] = 1.0; }, delay);
+      }
+    }
+    step = (step + 1) % COLS;
+    nextStepAt += stepDur();
+  }
+}
+
+function startPlay() {
+  playing    = true;
+  nextStepAt = audioCtx.currentTime + 0.05;
+  schedTimer = setInterval(scheduler, 25);
+  document.getElementById('play-btn').textContent = '■';
+  document.getElementById('play-btn').style.background = '#28a048';
+}
+
+function stopPlay() {
+  playing = false;
+  clearInterval(schedTimer);
+  document.getElementById('play-btn').textContent = '▶';
+  document.getElementById('play-btn').style.background = '#284898';
+}
+
+function togglePlay() {
+  if (!audioCtx) return;
+  playing ? stopPlay() : startPlay();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Canvas rendering
+// ═══════════════════════════════════════════════════════════════
+const canvas = document.getElementById('c');
+const ctx2   = canvas.getContext('2d');
+
+let CELL, GX, GY, GRID_W, GRID_H;
+const CTRL_H = 70;
+
+function resize() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight - CTRL_H;
+  CELL   = Math.min(Math.floor(canvas.width / COLS), Math.floor(canvas.height / ROWS));
+  GRID_W = CELL * COLS;
+  GRID_H = CELL * ROWS;
+  GX     = Math.floor((canvas.width  - GRID_W) / 2);
+  GY     = Math.floor((canvas.height - GRID_H) / 2);
+}
+
+function drawGlow(x, y, r, g, b, radius, intensity) {
+  const grd = ctx2.createRadialGradient(x, y, 0, x, y, radius * 1.8);
+  grd.addColorStop(0,   `rgba(${r},${g},${b},${intensity * 0.8})`);
+  grd.addColorStop(0.4, `rgba(${r},${g},${b},${intensity * 0.4})`);
+  grd.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+  ctx2.fillStyle = grd;
+  ctx2.beginPath();
+  ctx2.arc(x, y, radius * 1.8, 0, Math.PI*2);
+  ctx2.fill();
+  // Solid core
+  ctx2.fillStyle = `rgba(${r},${g},${b},1)`;
+  ctx2.beginPath();
+  ctx2.arc(x, y, radius * 0.55, 0, Math.PI*2);
+  ctx2.fill();
+}
+
+let prevFrameTime = performance.now();
+let playheadFrac  = 0;
+let prevStep      = 0;
+
+function render() {
+  requestAnimationFrame(render);
+  const now = performance.now();
+  const dt  = (now - prevFrameTime) / 1000;
+  prevFrameTime = now;
+
+  // Decay flash
+  for (let row = 0; row < ROWS; row++)
+    for (let col = 0; col < COLS; col++)
+      if (flash[row][col] > 0) flash[row][col] = Math.max(0, flash[row][col] - dt * 5.5);
+
+  ctx2.fillStyle = '#0a0a10';
+  ctx2.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Grid lines
+  ctx2.strokeStyle = '#1c1c28';
+  ctx2.lineWidth = 1;
+  for (let r = 0; r <= ROWS; r++) {
+    ctx2.beginPath();
+    ctx2.moveTo(GX, GY + r*CELL);
+    ctx2.lineTo(GX + GRID_W, GY + r*CELL);
+    ctx2.stroke();
+  }
+  for (let c = 0; c <= COLS; c++) {
+    ctx2.beginPath();
+    ctx2.moveTo(GX + c*CELL, GY);
+    ctx2.lineTo(GX + c*CELL, GY + GRID_H);
+    ctx2.stroke();
+  }
+
+  // Playhead
+  let ph_x;
+  if (playing && audioCtx) {
+    const elapsed = audioCtx.currentTime - (nextStepAt - stepDur());
+    const frac    = Math.min(1, elapsed / stepDur());
+    const prevCol = ((step - 1) + COLS) % COLS;
+    ph_x = GX + prevCol * CELL + frac * CELL;
+  } else {
+    ph_x = GX + step * CELL;
+  }
+
+  const phGrd = ctx2.createLinearGradient(ph_x, 0, ph_x + CELL, 0);
+  phGrd.addColorStop(0,   'rgba(255,255,255,0.04)');
+  phGrd.addColorStop(0.7, 'rgba(255,255,255,0.08)');
+  phGrd.addColorStop(1,   'rgba(255,255,255,0.18)');
+  ctx2.fillStyle = phGrd;
+  ctx2.fillRect(ph_x, GY, CELL, GRID_H);
+  ctx2.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx2.lineWidth = 2;
+  ctx2.beginPath();
+  ctx2.moveTo(ph_x + CELL, GY);
+  ctx2.lineTo(ph_x + CELL, GY + GRID_H);
+  ctx2.stroke();
+
+  // Dots
+  const DOT_R = Math.max(5, CELL * 0.28);
+  for (let row = 0; row < ROWS; row++) {
+    for (let col = 0; col < COLS; col++) {
+      const cx = GX + col*CELL + CELL/2;
+      const cy = GY + row*CELL + CELL/2;
+      const ii = grid[row][col];
+      if (ii === null) {
+        ctx2.fillStyle = '#262638';
+        ctx2.beginPath();
+        ctx2.arc(cx, cy, DOT_R * 0.55, 0, Math.PI*2);
+        ctx2.fill();
+      } else {
+        const inst = INSTRUMENTS[ii];
+        const f    = flash[row][col];
+        const r    = inst.r, g = inst.g, b = inst.b;
+        const boost = 1 + f * 0.5;
+        drawGlow(cx, cy, r, g, b, DOT_R * boost, 0.55 + f * 0.45);
+      }
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Instrument palette
+// ═══════════════════════════════════════════════════════════════
+let curInst = 0;
+const palette = document.getElementById('palette');
+INSTRUMENTS.forEach((inst, i) => {
+  const btn = document.createElement('button');
+  btn.className = 'inst-btn' + (i === 0 ? ' active' : '');
+  btn.style.background = inst.color;
+  btn.title = inst.name;
+  btn.innerHTML = `<span class="inst-label" style="color:${inst.color}">${inst.name}</span>`;
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.inst-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    curInst = i;
+  });
+  palette.appendChild(btn);
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  Input handling
+// ═══════════════════════════════════════════════════════════════
+let paintMode = null;   // true=paint, false=erase, null=idle
+let paintInst = null;
+let bpmDrag   = null;
+
+function cellAt(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const mx = clientX - rect.left, my = clientY - rect.top;
+  const col = Math.floor((mx - GX) / CELL);
+  const row = Math.floor((my - GY) / CELL);
+  if (col >= 0 && col < COLS && row >= 0 && row < ROWS) return [row, col];
+  return null;
+}
+
+canvas.addEventListener('mousedown', e => {
+  const c = cellAt(e.clientX, e.clientY);
+  if (!c) return;
+  const [row, col] = c;
+  if (e.button === 2) {
+    grid[row][col] = null; paintMode = false; paintInst = null;
+  } else {
+    if (grid[row][col] === null) {
+      grid[row][col] = curInst; paintMode = true; paintInst = curInst;
+    } else {
+      grid[row][col] = null; paintMode = false; paintInst = null;
+    }
+  }
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (paintMode === null) return;
+  const c = cellAt(e.clientX, e.clientY);
+  if (c) { const [row, col] = c; grid[row][col] = paintMode ? paintInst : null; }
+});
+
+canvas.addEventListener('mouseup',    () => { paintMode = null; paintInst = null; });
+canvas.addEventListener('mouseleave', () => { paintMode = null; paintInst = null; });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+// Touch support
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0], c = cellAt(t.clientX, t.clientY);
+  if (!c) return;
+  const [row, col] = c;
+  grid[row][col] = (grid[row][col] === null) ? curInst : null;
+  paintMode = grid[row][col] !== null; paintInst = grid[row][col];
+}, {passive:false});
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (paintMode === null) return;
+  const t = e.touches[0], c = cellAt(t.clientX, t.clientY);
+  if (c) { const [row, col] = c; grid[row][col] = paintMode ? paintInst : null; }
+}, {passive:false});
+
+canvas.addEventListener('touchend', () => { paintMode = null; });
+
+// BPM drag
+const bpmEl = document.getElementById('bpm-display');
+bpmEl.addEventListener('mousedown', e => { bpmDrag = { x: e.clientX, bpm }; });
+window.addEventListener('mousemove', e => {
+  if (!bpmDrag) return;
+  bpm = Math.max(40, Math.min(300, Math.round(bpmDrag.bpm + (e.clientX - bpmDrag.x) / 2)));
+  bpmEl.textContent = `♩ ${bpm} BPM`;
+});
+window.addEventListener('mouseup', () => { bpmDrag = null; });
+bpmEl.addEventListener('wheel', e => {
+  e.preventDefault();
+  bpm = Math.max(40, Math.min(300, bpm - Math.sign(e.deltaY) * 2));
+  bpmEl.textContent = `♩ ${bpm} BPM`;
+}, {passive:false});
+
+// Play button
+const playBtn = document.getElementById('play-btn');
+playBtn.style.background = '#284898';
+playBtn.addEventListener('click', togglePlay);
+
+// Keyboard
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space')  { e.preventDefault(); togglePlay(); }
+  if (e.code === 'KeyR')   { step = 0; }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  Init
+// ═══════════════════════════════════════════════════════════════
+window.addEventListener('resize', () => { resize(); });
+resize();
+render();
+
+// Audio context must be created on user gesture
+async function init() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SR });
+  await buildSounds();
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('ui').style.display = 'flex';
+}
+
+// Start on first interaction
+window.addEventListener('click',     init, { once: true });
+window.addEventListener('touchstart',init, { once: true });
+window.addEventListener('keydown',   init, { once: true });
+
+// Show click-to-start overlay
+document.getElementById('load-label').textContent = 'Click anywhere to start';
+document.getElementById('load-label').style.color = '#c8c8d8';
+</script>
+</body>
+</html>
