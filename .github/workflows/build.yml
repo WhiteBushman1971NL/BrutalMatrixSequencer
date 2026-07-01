@@ -19,27 +19,22 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: |
-          pip install pygame sounddevice numpy scipy pyinstaller
+        run: pip install pygame numpy scipy pyinstaller
 
-      - name: Bundle PortAudio DLL + Build EXE
-        shell: pwsh
-        run: |
-          # Find the PortAudio DLL that ships inside the sounddevice package
-          $sdDir = python -c "import sounddevice, os; print(os.path.dirname(sounddevice.__file__))"
-          $dlls = Get-ChildItem -Path $sdDir -Recurse -Filter "*.dll" | Select-Object -ExpandProperty FullName
-          $addBinary = ($dlls | ForEach-Object { "--add-binary `"$_;.`"" }) -join " "
-
-          # Build with explicit DLL inclusion
-          $cmd = "pyinstaller --onefile --windowed --name BrutalSequencer " +
-                 "--collect-all sounddevice --collect-data sounddevice " +
-                 "--collect-all pygame --collect-binaries pygame " +
-                 "--hidden-import pygame --hidden-import pygame.mixer " +
-                 "--hidden-import sounddevice --hidden-import numpy " +
-                 "--hidden-import scipy --hidden-import scipy.signal " +
-                 "$addBinary brutal_sequencer.py"
-          Write-Host "Running: $cmd"
-          Invoke-Expression $cmd
+      - name: Build EXE
+        run: >
+          pyinstaller
+          --onefile
+          --windowed
+          --name BrutalSequencer
+          --collect-all pygame
+          --collect-binaries pygame
+          --hidden-import pygame
+          --hidden-import pygame.mixer
+          --hidden-import numpy
+          --hidden-import scipy
+          --hidden-import scipy.signal
+          brutal_sequencer.py
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
